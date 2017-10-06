@@ -1,0 +1,1 @@
+C:\SQL2014Media\setup.exe /ConfigurationFile="C:\SQL2014Media\SQLConfig\ConfigurationFile.ini" /IACCEPTSQLSERVERLICENSETERMS

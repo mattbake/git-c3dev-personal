@@ -1,0 +1,831 @@
+<package>
+    <job id="setup">
+        <?job debug="true" ?>
+        
+        <runtime>
+            <named name="ConfigurationPass" type="string" 
+                helpstring="The configuration pass to apply." />
+        </runtime>
+
+        <object id="FSO" progid="Scripting.FileSystemObject" />
+        <object id="WshShell" progid="WScript.Shell" />
+                
+        <script language="VBScript" src="Utility.vbs" />
+
+        <script language="VBScript">
+
+            ' Following constants are defined as part of WillReboot documentation here:
+            ' https://technet.microsoft.com/en-us/library/cc722061(v=ws.10).aspx
+            Const UNATTEND_SYNCHRONOUS_COMMAND_RETURN_CODE_NO_REBOOT_REQUIRED = 0
+            Const UNATTEND_SYNCHRONOUS_COMMAND_RETURN_CODE_REBOOT_REQUIRED =  1
+
+            Dim g_Trace, oTraceEvent
+            Dim m_Environment
+            Dim g_objGuestInterface
+            Dim exitCode
+            
+            Dim kvp_configuration_pass, kvp_pa_start_time, kvp_pa_completion_time, kvp_pa_provision_state
+            
+            exitCode = UNATTEND_SYNCHRONOUS_COMMAND_RETURN_CODE_NO_REBOOT_REQUIRED
+
+            kvp_configuration_pass = WScript.Arguments.Named("ConfigurationPass")            
+            kvp_pa_start_time = kvp_configuration_pass & "_PA_StartTime"            
+            kvp_pa_completion_time = kvp_configuration_pass & "_PA_CompletionTime"            
+            kvp_pa_provision_state = kvp_configuration_pass & "_PA_ProvisionState"
+
+            WScript.Echo "Windows(R) Azure(TM) Provisioning Agent"
+            WScript.Echo "Copyright (c) Microsoft Corporation. All rights reserved."
+            WScript.Echo ""
+
+            Set g_Trace = GetScriptObject(WScript, "Tracing.wsf", "TraceSource")
+            g_Trace.Name = "Unattend"
+
+            Set g_objGuestInterface = GetScriptObject(WScript, "GuestInterface.wsf", "GuestInterface")
+            Set g_objGuestInterface.Script = WScript
+
+            Set oTraceEvent = g_Trace.CreateEvent("INFO")
+            With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("UnattendStart"))
+                With .appendChild(oTraceEvent.ownerDocument.createElement("Parameters"))
+                    .setAttribute "ConfigurationPass", WScript.Arguments.Named("ConfigurationPass")
+                End With
+            End With
+            g_Trace.TraceEvent oTraceEvent
+
+            If WScript.Arguments.Named("ConfigurationPass") = "" Then
+                WScript.Echo "Usage: Unattend.wsf "
+                WScript.Echo "  [/ConfigurationPass:[specialize|oobeSystem|errorHandler|roleReady]]"
+
+                WScript.Quit 1
+            End If
+    
+            'Delete old registries
+            If WScript.Arguments.Named("ConfigurationPass") = "specialize" Then
+                DeleteKvpRegistry g_Trace
+            End If
+            
+            SetKvpRegistry kvp_pa_start_time, GetCurrentTimeInUTC(), g_Trace            
+
+            Call InitializeEnvironment
+
+            exitCode = ExecuteConfigurationPass()
+
+            SetKvpRegistry kvp_pa_completion_time, GetCurrentTimeInUTC(), g_Trace
+   
+            Set oTraceEvent = g_Trace.CreateEvent("INFO")
+            With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("UnattendEnd"))
+                 .setAttribute "ExitCode", exitCode
+            End With
+            g_Trace.TraceEvent oTraceEvent
+            	    
+            WScript.Echo "Done"
+            WScript.Quit exitCode
+
+            ' This function returns an exit code for the script to exit with.
+            Function ExecuteConfigurationPass
+                Dim configurationPass
+                Dim imcInjected
+
+                ExecuteConfigurationPass = UNATTEND_SYNCHRONOUS_COMMAND_RETURN_CODE_NO_REBOOT_REQUIRED
+                imcInjected = False
+
+                configurationPass = WScript.Arguments.Named("ConfigurationPass")
+                WScript.Echo "Executing configuration pass '" & configurationPass & "'"
+
+                imcInjected = ImcWasInjected()
+
+                ' There are 2 cases where performing a wireserver discovery is not negatvely impacting.
+                '    1. IMC was not injected - in this case, VM is going through a reboot anyways. So, we don't care if wireserver discovery 
+                '       starts additional non-oobe services.
+                '    2. IMC was injected - in this case, if it is not specialize pass, then perform wireserver discovery. We don't care about
+                '       non-oobe services starting in any pass other than specialize.
+                '    Note: There could be a case where IMC was injected, we are at specialize configuration pass, and reboot needs to 
+                '          occur. In this case, we will perform wireserver discovery before reboot in order to set provisioning status.
+                If (imcInjected = False Or (imcInjected = True And configurationPass <> "specialize")) Then
+                    InitializeGuest
+                End If
+
+                If configurationPass = "specialize" Then
+
+                    On Error Resume Next
+
+                    Dim pageFileReturnValue, sanPolicyReturnValue
+                    pageFileReturnValue = False
+                    sanPolicyReturnValue = False
+
+                    If imcInjected = False Then
+                        ' If IMC was not injected, then report the state here to maintain existing behavior without IMC.
+                        InstrumentProcedure "ReportNotReady", " ""Provisioning"", ""Windows is preparing your computer for first use..."" ", False, False, "PA_specialize_0_ReportNotReady", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: ReportNotReady failed"
+                    End If
+
+                    pageFileReturnValue = InstrumentProcedure("ConfigurePageFile", "", True, False, "PA_specialize_1_ConfigurePageFile", g_Trace)
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigurePageFile failed"
+                    
+                    InstrumentProcedure "ConfigureBootStatusPolicy", "", False, False, "PA_specialize_2_ConfigureBootStatusPolicy", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureBootStatusPolicy failed"
+                    
+                    InstrumentProcedure "ConfigureTimeSettings", "", False, False, "PA_specialize_3_ConfigureTimeSettings", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureTimeSettings failed"
+                    
+                    sanPolicyReturnValue = InstrumentProcedure("ConfigureSanPolicy", "", True, False, "PA_specialize_4_ConfigureSanPolicy", g_Trace)
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureSanPolicy failed"
+                    
+                    InstrumentProcedure "ConfigureRdpKeepAlive", "", False, False, "PA_specialize_5_ConfigureRdpKeepAlive", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureRdpKeepAlive failed"
+                    
+                    InstrumentProcedure "CopyCustomData", "", False, False, "PA_specialize_6_CopyCustomData", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: CopyCustomData failed"
+                    
+                    InstrumentProcedure "CopyTempDriveWarningReadme", "", False, False, "PA_specialize_7_CopyTempDriveWarningReadme", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: CopyTempDriveWarningReadme failed"
+                    
+                    ' Optimization for single reboot at the most.
+                    ' If IMC was injected and PA disagreed with the page file or SAN policy value set by IMC and 
+                    ' PA reset them, PA needs to tell setup that a reboot is needed by returning 1.
+                    ' If IMC was not injected and PA disagrees on the page file and SAN policy value, we return
+                    ' 0 (i.e. no reboot required) and rely on Windows Setup to reboot based on Windows Setup 
+                    ' setting the computer name - this is the existing behavior today.
+                    If ((pageFileReturnValue = True Or sanPolicyReturnValue = True) And imcInjected = True) Then
+                        ExecuteConfigurationPass = UNATTEND_SYNCHRONOUS_COMMAND_RETURN_CODE_REBOOT_REQUIRED
+
+                        ' Since we are going through a reboot after specialize, even though IMC was injected,
+                        ' report the provisioning state here as reboot may take a while and it is a good idea
+                        ' to notify portal that provisioning is in progress. Call InitializeGuest since
+                        ' wireserver discovery is not yet performed. Since reboot is going to happen anyways,
+                        ' we don't care about non-OOBE services starting as a result of wireserver discovery.
+                        InitializeGuest
+                        InstrumentProcedure "ReportNotReady", " ""Provisioning"", ""Windows is preparing your computer for first use..."" ", False, False, "PA_specialize_8_ReportNotReady", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: ReportNotReady failed"
+                    End If
+                End If
+
+                If configurationPass = "oobeSystem" Then
+
+                    On Error Resume Next
+
+                    Dim restartRequired
+                    restartRequired = False
+                    
+                    If imcInjected = True Then
+                        ' If IMC was injected, then we most likely did not report this state/description during specialize pass (unless a reboot ocurred even though IMC was injected).
+                        ' So, report it here now to maintain parity in that the reporting was not lost.
+                        ' When IMC is injected, transition from specialize to OOBE should happen very quick (in a second or two). 
+                        ' So, delaying the state reporting by that much does not matter.
+                        InstrumentProcedure "ReportNotReady", " ""Provisioning"", ""Windows is preparing your computer for first use..."" ", False, False, "PA_oobeSystem_0_ReportNotReady", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: ReportNotReady failed"
+                    End If
+            
+                    ' remediation
+                    InstrumentProcedure "ConfigureAdministratorUsername", "", False, False, "PA_oobeSystem_1_ConfigureAdministratorUsername", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureAdministratorUsername failed"
+                    
+                    InstrumentProcedure "ConfigureCertificates", "", False, False, "PA_oobeSystem_2_ConfigureCertificates", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureCertificates failed"
+                    
+                    InstrumentProcedure "ConfigureWinRm", "", False, False, "PA_oobeSystem_3_ConfigureWinRm", g_Trace                
+                    If Err.number = 0 Then
+                        ' Send a signal that WinRM provisioning was complete        
+                        InstrumentProcedure "ReportNotReady", " ""Provisioning"", ""Remote access ready..."" ", False, False, "PA_oobeSystem_4_ReportNotReady", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: ReportNotReady failed"
+                    Else
+                        TraceError g_Trace, "ExecuteConfigurationPass: ConfigureWinRm failed or did not run."
+                    End If
+                    
+                    ' Continue with rest of the steps        
+                    InstrumentProcedure "ConfigureBCD", "", False, False, "PA_oobeSystem_5_ConfigureBCD", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureBCD failed"
+                    
+                    InstrumentProcedure "ConfigureTimeService", "", False, False, "PA_oobeSystem_6_ConfigureTimeService", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureTimeService failed"
+                    
+                    InstrumentProcedure "ConfigureLicensing", "", False, False, "PA_oobeSystem_7_ConfigureLicensing", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureLicensing failed"
+                    
+                    InstrumentProcedure "UpdateRDPCertificateThumbprint", "", False, False, "PA_oobeSystem_8_UpdateRDPCertificateThumbprint", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: UpdateRDPCertificateThumbprint failed"
+                    
+                    InstrumentProcedure "ConfigureAutomaticUpdates", "", False, False, "PA_oobeSystem_9_ConfigureAutomaticUpdates", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureAutomaticUpdates failed"
+                    
+                    InstrumentProcedure "SetScreenAlwaysOn", "", False, False, "PA_oobeSystem_10_SetScreenAlwaysOn", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: SetScreenAlwaysOn failed"
+                    
+                    restartRequired = InstrumentProcedure("ConfigureGuestAgentService", """PA_oobeSystem_11_ConfigureGuestAgentService_""", True, False, "PA_oobeSystem_11_ConfigureGuestAgentService", g_Trace)
+                    TraceError g_Trace, "ExecuteConfigurationPass: ConfigureGuestAgentService failed"
+            
+                    If restartRequired = True Then
+                        InstrumentProcedure "RestartMachine", "", False, False, "PA_oobeSystem_12_RestartMachine", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: RestartMachine"
+                    Else
+                        InstrumentProcedure "ReportReady", "", False, False, "PA_oobeSystem_13_ReportReady", g_Trace
+                        TraceError g_Trace, "ExecuteConfigurationPass: ReportReady failed"
+                    End If
+                End If
+
+                If configurationPass = "errorHandler" Then
+
+                    On Error Resume Next
+
+                    InstrumentProcedure "ReportNotReady", " ""ProvisioningFailed"", ""This installation of Windows is undeployable."" ", False, False, "PA_errorHandler_0_ReportNotReady", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ReportNotReady failed"
+                End If
+
+                If configurationPass = "roleReady" Then
+
+                    On Error Resume Next
+
+                    InstrumentProcedure "ReportReady", "", False, False, "PA_roleReady_0_ReportReady", g_Trace
+                    TraceError g_Trace, "ExecuteConfigurationPass: ReportReady failed"
+                End If
+
+            End Function
+
+            Sub ConfigureBootStatusPolicy
+                Set bootConfig = GetScriptObject(WScript, "BootConfig.wsf", "BootConfig")
+                Set bootConfig.Script = WScript
+                bootConfig.Initialize
+
+                bootConfig.ConfigureBootStatusPolicy
+            End Sub
+
+            Sub ConfigureAdministratorUsername
+                On Error Resume Next
+                Dim newUserName
+        
+                Set os = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set os.Script = WScript
+                os.Initialize
+        
+                If m_Environment is Nothing Then
+                    Exit Sub
+                End If
+
+                Set objOSDParams = m_Environment.GetOSDParameters()
+
+                Set objUserName = objOSDParams.selectSingleNode("wa:AdminUsername")
+                If Not (objUserName is Nothing) Then
+                    newUserName = objUserName.text
+                    os.RenameDefaultAdministratorAccount newUserName
+                End If
+            End Sub
+    
+            Sub ConfigureBCD
+                On Error Resume Next
+                Set bootConfig = GetScriptObject(WScript, "BootConfig.wsf", "BootConfig")
+                Set bootConfig.Script = WScript
+                bootConfig.Initialize
+
+                bootConfig.ConfigureBCD
+                bootConfig.ConfigureRecoveryEnabledFlag
+            End Sub
+
+            ' This function returns True if reboot is required; otherwise returns False.
+            Function ConfigurePageFile
+
+                Dim drivespec
+                On Error Resume Next
+
+                ConfigurePageFile = False
+
+                drivespec = GetResourceDrive(g_Trace)
+                TraceError g_Trace, "ConfigurePageFile: GetResourceDrive failed"
+
+                If IsNull(drivespec) Or IsEmpty(drivespec) Then
+                    ' not executing in the cloud
+                    Exit Function
+                End If
+                On Error Resume Next
+
+                Set os = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set os.Script = WScript
+                os.Initialize
+
+                ' Setting minimum and maximum page file size to zero implies that
+                ' the size of the page file should be managed by Windows.
+                ConfigurePageFile = os.SetPageFile(drivespec, 0, 0)
+
+            End Function
+
+            Sub ConfigureLicensing
+                ' Check if there is a KMS Server configured in the provisioning agent.
+                Dim objOSDParams, objKmsElement, keyManagementServiceMachine, useAVMA
+
+                If m_Environment is Nothing Then
+                    Exit Sub
+                End If
+
+                Set objPlatformParams = m_Environment.GetPlatformProvisioningParameters()
+
+                Set objKmsElement = objPlatformParams.selectSingleNode("wa:KmsServerHostname")
+                If Not (objKmsElement is Nothing) Then keyManagementServiceMachine = objKmsElement.text
+
+                Set objUseAVMA = objPlatformParams.selectSingleNode("wa:UseAVMA")
+                If Not (objUseAVMA is Nothing) Then
+                    If LCase(objUseAVMA.text) = "true" Then
+                       useAVMA = True
+                    End If
+                End If
+ 
+                Set objLicensing = GetScriptObject(WScript, "Licensing.wsf", "SoftwareLicensing")
+                Set objLicensing.Script = WScript
+                objLicensing.Initialize
+
+                objLicensing.ConfigureLicensing keyManagementServiceMachine, useAVMA
+            End Sub
+
+            Sub UpdateRDPCertificateThumbprint
+                Dim objOS, sThumbprint
+                On Error Resume Next
+
+                Set objOS = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set objOS.Script = WScript
+                objOS.Initialize
+                sThumbprint = objOS.GetRdpCertificateThumbprint()
+                
+                Dim properties : Set properties = CreateObject("Scripting.Dictionary")
+                properties.Add "CertificateThumbprint", sThumbprint
+
+                If TraceError(g_Trace, "UpdateRDPCertificateThumbprint: GetRdpCertificateThumbprint failed") = 0 Then
+                    g_objGuestInterface.PutProvisioningStatus Null, Null, Null, properties
+                    TraceError g_Trace, "UpdateRDPCertificateThumbprint: PutProvisioningStatus failed"
+                End If
+                
+                ' KVP Diagnostics
+                Dim kvp_cert_acquisition, kvpMessage
+                
+                kvp_cert_acquisition = WScript.Arguments.Named("ConfigurationPass") & "_PA_CertAquisition"                
+                kvpMessage = "[" & GetCurrentTimeInUTC() & "]" & ": [GetRdpCertificateThumbprint] "
+                
+                If sThumbprint = "" Then
+                    kvpMessage = kvpMessage & "Failed to acquire cert thumbprint"
+                Else
+                    kvpMessage = kvpMessage & "Cert thumprint is: " & sThumbprint
+                End If
+                
+                SetKvpRegistry kvp_cert_acquisition, kvpMessage, g_Trace                                
+            End Sub
+
+            Sub ConfigureCertificates
+                Dim objCertMgr
+                On Error Resume Next
+        
+                Set objCertMgr = GetScriptObject(WScript, "Certificates.wsf", "CertificateManager")
+                Set objCertMgr.Script = WScript
+
+                objCertMgr.Initialize g_objGuestInterface
+                objCertMgr.InstallCertificates()
+            End Sub
+       
+            Sub ConfigureTimeSettings
+                Dim objOS
+        
+                Set objOS = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set objOS.Script = WScript
+                objOS.Initialize
+
+                objOS.ConfigureTimeSettings
+            End Sub
+     
+            Sub ConfigureTimeService
+                Dim objOS
+        
+                Set objOS = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set objOS.Script = WScript
+                objOS.Initialize
+
+                objOS.ConfigureTimeService
+            End Sub
+
+            Sub ConfigureAutomaticUpdates
+                Dim objOSDParams, objAUElement
+
+                If m_Environment is Nothing Then
+                    Exit Sub
+                End If
+
+                Set objOSDParams = m_Environment.GetOSDParameters()
+
+                Set objAUElement = objOSDParams.selectSingleNode("wa:EnableAutomaticUpdates")
+                If Not (objAUElement is Nothing) Then
+                    If LCase(objAUElement.text) = "true" Then
+                        Set os = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                        Set os.Script = WScript
+                        os.Initialize
+                        os.ConfigureAutomaticUpdates True
+                    End If
+                End If
+            End Sub
+
+            Function ConfigureGuestAgentService(kvpPrefix)
+                On Error Resume Next
+                Dim objOSDParams, objGAElement, restartRequired
+                restartRequired = False
+                ConfigureGuestAgentService = False
+                If m_Environment is Nothing Then
+                    Exit Function
+                End If
+
+                Set objOSDParams = m_Environment.GetPlatformProvisioningParameters()
+                Set objGAElement = objOSDParams.selectSingleNode("wa:ProvisionGuestAgent")
+                            
+                If Not (objGAElement is Nothing) Then
+                    If LCase(objGAElement.text) = "true" Then
+                        Set objOSDParams = m_Environment.GetPlatformProvisioningParameters()
+                        Set objGAZipName = objOSDParams.selectSingleNode("wa:GuestAgentPackageName")
+                        If Not (objGAZipName is Nothing) Then
+                            Set ga = GetScriptObject(WScript, "GuestAgent.wsf", "GuestAgent")
+                            Set ga.Script = WScript
+                            ga.Initialize objGAZipName.text
+                            restartRequired = ga.ConfigureGuestAgent(kvpPrefix)
+                            Set oTraceEvent = g_Trace.CreateEvent("INFO")
+                            With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("ConfigureGuestAgentService"))
+                                .setAttribute "ConfigureGuestAgentReturnValue", restartRequired
+                            End With
+                            g_Trace.TraceEvent oTraceEvent
+                            ConfigureGuestAgentService = restartRequired
+                        Else
+                            Set oTraceEvent = g_Trace.CreateEvent("ERROR")
+                            With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("ConfigureGuestAgentService"))
+                                .setAttribute "GuestAgentPackageNameFound", False
+                            End With
+                            g_Trace.TraceEvent oTraceEvent
+                        End If
+                    Else
+                        UninstallGuestAgent kvpPrefix
+                    End If
+                Else
+                    UninstallGuestAgent kvpPrefix
+                End If
+            End Function
+            
+            Sub UninstallGuestAgent(kvpPrefix)
+                Set ga = GetScriptObject(WScript, "GuestAgent.wsf", "GuestAgent")
+                Set ga.Script = WScript
+                ga.Initialize ""
+                ga.UninstallGuestAgent "ServiceOnly", kvpPrefix
+            End Sub
+            
+            Sub RestartMachine
+                On Error Resume Next
+                Set oTraceEvent = g_Trace.CreateEvent("INFO")
+                With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("ResartMachine"))
+                    .setAttribute "RestartingMachine", "True"
+                End With
+                g_Trace.TraceEvent oTraceEvent
+                ExecuteAndTraceWithResults "%SystemRoot%\System32\shutdown.exe /r /t 0", g_trace
+            End Sub
+
+            ' This function returns True if reboot is required; otherwise returns False.
+            Function ConfigureSanPolicy
+                Dim objOS
+
+                Set objOS = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set objOS.Script = WScript
+                objOS.Initialize
+
+                ConfigureSanPolicy = objOS.ConfigureSanPolicy
+            End Function
+
+            Sub ConfigureRdpKeepAlive
+                Dim objOS
+        
+                Set objOS = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                Set objOS.Script = WScript
+                objOS.Initialize
+
+                objOS.ConfigureRdpKeepAlive True, 1
+            End Sub
+
+            Sub CopyCustomData
+                Dim configSetDrive, sourceFile, targetFileName, localFolder
+                Dim objOSDParams, objCustomData
+                On Error Resume Next
+
+                configSetDrive = GetConfigSetDrive()
+                If IsNull(configSetDrive) Then
+                    Set oTraceEvent = g_Trace.CreateEvent("ERROR")
+                    With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("CopyCustomData"))
+                        .Text = "Could not find E6DA6616-8EC4-48E0-BE93-58CE6ACE3CFB.tag in any of the drives"
+                    End With
+                    g_Trace.TraceEvent oTraceEvent
+                    Exit Sub
+                End If
+                configSetDrive = configSetDrive & "\"
+                sourceFile = FSO.BuildPath(configSetDrive, "CustomData.bin")
+                'verify custom file exists
+                If (Not FSO.FileExists(sourceFile)) Then
+                    ' verify whether the CustomData field exists in the ovf_env file
+                    ' if it exists, the CustomData.bin should exist too
+                    Set objOSDParams = m_Environment.GetOSDParameters()
+                    Set objCustomData = objOSDParams.selectSingleNode("wa:CustomData")
+                    If Not (objCustomData is Nothing) Then
+                        ' the error message will be logged after the sub exit 
+                        Err.Raise vbObjectError + 2, "Unattend.wsf", "CustomData present in configuration set but " + sourceFile + " file not found"
+                    End If
+                    Exit Sub
+                End If
+                ' try creating local folder
+                localFolder = WshShell.ExpandEnvironmentStrings("%SYSTEMDRIVE%") + "\AzureData"
+                If (Not FSO.FolderExists(localFolder)) Then
+                    FSO.CreateFolder(localFolder)
+                    If (Err.number <> 0) Then
+                        TraceError g_Trace, "CopyCustomData: Error creating folder " + localFolder
+                        Exit Sub
+                    End If
+                End If
+                'set proper folder ACLs: S-1-5-18 is the Sid for NT AUTHORITY\SYSTEM and S-1-5-32-544 is the Sid for BUILTIN\Administrators
+                ExecuteAndTraceWithResults "%SystemRoot%\System32\icacls "+ localFolder +  " /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F", g_trace
+                'delete existing file if any
+                targetFileName = FSO.BuildPath(localFolder, "\CustomData.bin")
+                If FSO.FileExists(targetFileName) Then
+                    'file already exists: take ownership, delete existing file if any. We need to take ownership because the file was created with another owner
+                    'and even though we have full privileges, the system would not delete the file
+                    ExecuteAndTraceWithResults "%SystemRoot%\System32\takeown /F "+ targetFileName, g_trace
+                    FSO.DeleteFile targetFileName, true
+                    If (Err.number <> 0) Then
+                        TraceError g_Trace, "CopyCustomData: Error deleting existing file " + targetFileName
+                        Exit Sub
+                    End If
+                End If
+                'now copy the file
+                FSO.CopyFile sourceFile, targetFileName
+                'this displays the message if Err.number is not 0, and also clears the error
+                TraceError g_Trace, "CopyCustomData: Error copying file"
+            End Sub
+    
+            Function GetConfigSetDrive
+                Dim oResults
+                Set oResults = ExecuteAndTraceWithResults("cmd.exe /c ""(for %1 in (z y x w v u t s r q p o n m l k j i h g f e d c b a) do @(DIR %1:\ 1>NUL 2>&1 && if exist %1:\E6DA6616-8EC4-48E0-BE93-58CE6ACE3CFB.tag (echo %1: & exit))) & exit 3""", g_Trace)
+                If oResults.ExitCode = 0 Then
+                    GetConfigSetDrive = Trim(Replace(oResults.StdOut, vbCrLf, ""))
+                Else
+                    GetConfigSetDrive = Null
+                End If
+            End Function
+            
+            Sub CopyTempDriveWarningReadme
+                Dim resourceDrive, configSetDrive, sourcePath, warningReadmeFileName, sourceFile, destFile
+                On Error Resume Next
+                
+                warningReadmeFileName = "DATALOSS_WARNING_README.txt"
+                
+                'Identify the drive containing the mounted ISO and its enclosed PA bits
+                configSetDrive = GetConfigSetDrive()
+                TraceError g_Trace, "CopyTempDriveWarningReadme: GetConfigSetDrive failed"            
+                If IsNull(configSetDrive) Or IsEmpty(configSetDrive) Then
+                    Set oTraceEvent = g_Trace.CreateEvent("ERROR")
+                    With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("CopyTempDriveWarningReadme"))
+                        .Text = "Could not find the drive with the PA bits and provisioning configurationset content"
+                    End With
+                    g_Trace.TraceEvent oTraceEvent
+                    Exit Sub
+                End If              
+                configSetDrive = configSetDrive & "\"
+                sourcePath = configSetDrive & "$$\OEM\"
+                
+                'Verify the warning README file exists in the source location w/ the PA bits
+                sourceFile = FSO.BuildPath(sourcePath, warningReadmeFileName)
+                If (Not FSO.FileExists(sourceFile)) Then
+                    Err.Raise vbObjectError + 2, "Unattend.wsf", "CopyTempDriveWarningReadme: Unable to find source file: " + sourceFile + ". Exiting subroutine..."
+                    Exit Sub
+                End If
+                Set oTraceEvent = g_Trace.CreateEvent("INFO")
+                With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("CopyTempDriveWarningReadme"))
+                    .Text = "configSetDrive: " & configSetDrive & ", sourcePath: " & sourcePath & ", sourceFile: " & sourceFile
+                End With
+                g_Trace.TraceEvent oTraceEvent
+                
+                'Identify the resource drive for the instance (typically D:)
+                resourceDrive = GetResourceDrive(g_Trace)
+                TraceError g_Trace, "CopyTempDriveWarningReadme: GetResourceDrive failed"
+                If IsNull(resourceDrive) Or IsEmpty(resourceDrive) Then
+                    Set oTraceEvent = g_Trace.CreateEvent("ERROR")
+                    With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("CopyTempDriveWarningReadme"))
+                        .Text = "Could not find the resource drive. Exiting subroutine..."
+                    End With
+                    g_Trace.TraceEvent oTraceEvent
+                    Exit Sub
+                End If
+                resourceDrive = resourceDrive & "\"
+                Set oTraceEvent = g_Trace.CreateEvent("INFO")
+                With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("CopyTempDriveWarningReadme"))
+                    .Text = "resourceDrive: " & resourceDrive & ", destFile: " & destFile
+                End With
+                g_Trace.TraceEvent oTraceEvent
+
+                destFile = FSO.BuildPath(resourceDrive, warningReadmeFileName)
+                
+                'Copy the README file to the resource drive
+                FSO.CopyFile sourceFile, destFile
+                'this displays the message if Err.number is not 0, and also clears the error
+                TraceError g_Trace, "CopyTempDriveWarningReadme: Error copying file: " & readmeFileName
+            End Sub
+
+            Sub ConfigureWinRm
+                const winRmHttpPort = 5985
+                const winRmHttpsPort = 5986
+                const NET_FW_IP_PROTOCOL_TCP = 6
+                On Error Resume Next
+
+                Dim oResults
+                Dim objOS, objWinRmElement, objOSDParams, objListeners, objListener, objListenerType
+
+                If m_Environment is Nothing Then
+                    Err.Raise vbObjectError + 2, "Unattend.wsf", "ovf-env.xml was not loaded."
+                    Exit Sub
+                End If
+
+                Set objOSDParams = m_Environment.GetOSDParameters()
+
+                Set objWinRmElement = objOSDParams.selectSingleNode("wa:WinRM")
+                If Not (objWinRmElement is Nothing) Then
+                    Set os = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                    Set os.Script = WScript
+                    os.Initialize
+
+                    'Iterate through all the listeners and create listener endpoints as necessary.
+                    Set objListeners = objWinRmElement.selectSingleNode("Listeners")    
+                    Set objListener = objListeners.selectNodes("Listener")
+
+                    If objListener.Length > 0 Then 
+                        os.RemoveWinRmListeners
+                        os.RemoveHttpSslConfiguration winRmHttpsPort
+                    End If
+            
+                    For i = 0 to objListener.Length - 1
+                        Set objListenerType = objListener(i).selectSingleNode("Protocol")
+
+                        If LCase(objListenerType.Text) = "http" Then
+                            os.ConfigureWinRmHttpListener winRmHttpPort
+                            TraceError g_Trace, "ConfigureWinRm: Could not configure HTTP listener"
+
+                            os.AddFirewallRule "Windows Remote Management (HTTP-In) (Azure)", "System", NET_FW_IP_PROTOCOL_TCP, winRmHttpPort, "*", True
+                            TraceError g_Trace, "ConfigureWinRm: Could not configure HTTP listener firewall rule"
+                        ElseIf LCase(objListenerType.Text) = "https" Then
+                            Set objCertificateThumbprint = objListener(i).selectSingleNode("CertificateThumbprint")
+                            os.ConfigureWinRmHttpsListener winRmHttpsPort, objCertificateThumbprint.Text
+                            TraceError g_Trace, "ConfigureWinRm: Could not configure HTTPS listener"
+
+                            os.AddFirewallRule "Windows Remote Management (HTTPS-In) (Azure)", "System", NET_FW_IP_PROTOCOL_TCP, winRmHttpsPort, "*", True
+                            TraceError g_Trace, "ConfigureWinRm: Could not configure HTTPS listener firewall rule"
+                        End If
+                    Next
+
+                    os.ChangeWinRmServiceStartModeAuto
+                    TraceError g_Trace, "ConfigureWinRm: ChangeWinRmServiceStartModeAuto failed"
+                    os.RestartWinRmService(WScript)
+                Else
+                    Err.Raise vbObjectError + 2, "Unattend.wsf", "WinRM node was not found in configuration."
+                    Exit Sub
+                End If
+            End Sub
+            
+            Sub SetScreenAlwaysOn
+                Dim oResults
+                
+                Set oResults = ExecuteAndTraceWithResults("powercfg /setacvalueindex SCHEME_CURRENT SUB_VIDEO VIDEOIDLE 0", g_Trace)
+                
+                If oResults.ExitCode <> 0 Then
+                    Err.Raise vbObjectError + 3, "Unattend.wsf", "Failed to configure screen to be always-on"
+                End If      
+            End Sub
+
+            Sub InitializeEnvironment                
+                Dim objEnv, configSetDrive				
+                Set objEnv = GetScriptObject(WScript, "Environment.wsf", "Environment")
+                Set objEnv.Script = WScript
+                Set m_Environment = Nothing
+
+                On Error Resume Next				
+                ' Log OS version
+                If WScript.Arguments.Named("ConfigurationPass") = "oobeSystem" Then
+                    Dim os : Set os = GetScriptObject(WScript, "OperatingSystem.wsf", "OperatingSystem")
+                    Set os.Script = WScript
+                    os.Initialize
+		            Dim objOs : Set objOs = os.GetCurrentOperatingSystem
+                    If TraceError(g_Trace, "Set Kvp value: os.GetCurrentOperatingSystem failed") = 0 Then
+                        Dim kvp_os_version: kvp_os_version = WScript.Arguments.Named("ConfigurationPass") & "_PA_OSVersion"			
+                        SetKvpRegistry kvp_os_version, objOs.Caption & " " & objOs.Version, g_Trace 'OS version                        
+                    End If   
+                End If
+				
+                configSetDrive = GetConfigSetDrive()
+                If IsNull(configSetDrive) Then
+                    Set oTraceEvent = g_Trace.CreateEvent("ERROR")
+                    With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("InitializeEnvironment"))
+                        .Text = "Could not find E6DA6616-8EC4-48E0-BE93-58CE6ACE3CFB.tag in any of the drives"
+                    End With
+                    g_Trace.TraceEvent oTraceEvent
+                    Exit Sub
+                End If
+
+                objEnv.Initialize configSetDrive
+                If TraceError(g_Trace, "InitializeEnvironment: objEnv.Initialize failed") = 0 Then
+                    Set m_Environment = objEnv
+                End If
+            End Sub
+
+            Sub InitializeGuest
+                WScript.Echo "Initializing Control System"
+                On Error Resume Next
+
+                Dim configSetDrive
+                configSetDrive = GetConfigSetDrive()
+                TraceError g_Trace, "CopyTempDriveWarningReadme: GetConfigSetDrive failed"                 
+                
+                g_objGuestInterface.Initialize(configSetDrive)
+                If TraceError(g_Trace, "InitializeGuest: g_objGuestInterface.Initialize failed") <> 0 Then
+                    Exit Sub
+                End If
+            End Sub
+
+            Sub ReportNotReady(sSubStatus, sDescription)                
+                g_objGuestInterface.PutProvisioningStatus "NotReady", sSubstatus, sDescription, Nothing              
+                TraceError g_Trace, "ReportNotReady: PutProvisioningStatus failed"
+                SetKvpRegistry kvp_pa_provision_state, sSubStatus, g_Trace
+            End Sub
+
+            Sub ReportReady                
+                g_objGuestInterface.PutProvisioningStatus "Ready", Null, Null, Nothing  
+                TraceError g_Trace, "ReportReady: PutProvisioningStatus failed"
+                SetKvpRegistry kvp_pa_provision_state, "Provisioned", g_Trace
+            End Sub
+            
+            Sub DeleteKvpRegistry(tracer)
+                On Error Resume Next
+                
+                DeleteSpecificKvpRegistry tracer, "specialize"
+                If TraceError(tracer, "DeleteKvpRegistry: Delete registry for configuration pass" & "specialize" & " failed.") = 0 Then
+                    TraceKvpStatus tracer, "specialize", "INFO", "success", "DeleteKvpRegistry"
+                End If
+                
+                DeleteSpecificKvpRegistry tracer, "oobeSystem"
+                If TraceError(tracer, "DeleteKvpRegistry: Delete registry for configuration pass" & "oobeSystem" & " failed.") = 0 Then
+                    TraceKvpStatus tracer, "oobeSystem", "INFO", "success", "DeleteKvpRegistry"
+                End If
+                
+                DeleteSpecificKvpRegistry tracer, "reportReady"
+                If TraceError(tracer, "DeleteKvpRegistry: Delete registry for configuration pass" & "reportReady" & " failed.") = 0 Then
+                    TraceKvpStatus tracer, "reportReady", "INFO", "success", "DeleteKvpRegistry"
+                End If
+                
+                DeleteSpecificKvpRegistry tracer, "errorHandler"
+                If TraceError(tracer, "DeleteKvpRegistry: Delete registry for configuration pass" & "errorHandler" & " failed.") = 0 Then
+                    TraceKvpStatus tracer, "errorHandler", "INFO", "success", "DeleteKvpRegistry"
+                End If
+                
+            End Sub
+
+            Sub DeleteSpecificKvpRegistry(tracer, keyWord)    
+                const fullPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Virtual Machine\Guest"
+                
+                Dim objExec
+                Dim strCommand
+                Dim line
+                Dim arr
+                
+                On Error Resume Next
+                
+                strCommand = "REG QUERY " & """" & fullPath & """| "_
+                             & "findstr " & "/i " & keyWord
+                strCommand = "%comspec% /c " & strCommand
+                Set objExec = WshShell.Exec(strCommand)
+                Do
+                    line = Trim(objExec.StdOut.ReadLine())
+                    If InStr(line, "End of search") <> 0 Then Exit Do
+                    If Len(line) <> 0 And InStr(line, fullPath) = 0 Then
+                        arr = Split(line, "    ")
+                        WshShell.RegDelete(fullPath & "\" & arr(0))
+                    End If
+                Loop While Not objExec.Stdout.AtEndOfStream
+            End Sub
+
+            ' This function queries the registry for IMC sequence number. 
+            ' If it finds the sequence number to be 0xf (the value is set by host agent when injecting IMC),
+            ' the function returns true. It returns false otherwise.
+            Private Function ImcWasInjected()
+                const fullPath = "HKLM\SYSTEM\CurrentControlSet\Control\InitialMachineConfig"
+                const imcSequenceSetByDimc = "0xf"
+
+                Dim registryValue
+	
+                ImcWasInjected = False
+	
+                registryValue = GetRegistryValue(g_Trace, fullPath, "Sequence", True)
+	
+                If IsNull(registryValue) Then
+                    Set oTraceEvent = g_Trace.CreateEvent("INFO")
+                    With oTraceEvent.appendChild(oTraceEvent.ownerDocument.createElement("ImcWasInjected"))
+                        .Text = "Failed to find a value for IMC sequence number."
+                    End With
+                    g_Trace.TraceEvent oTraceEvent
+                    Exit Function
+                End If
+
+                If imcSequenceSetByDimc = registryValue Then
+                    ImcWasInjected = True
+                End If
+            End Function
+        </script>
+    </job>
+</package>
