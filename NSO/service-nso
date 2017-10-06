@@ -9,10 +9,6 @@
 cmd=$1
 SVCNAME="nso"
 
-### NSO Information ###
-# IP Address of the NSO API endpoint
-NSO_ENDPOINT=$NsoEndpoint
-
 
 ### Instance ID ###
 #This is a "unique id" that identifies THIS 'service instance'
