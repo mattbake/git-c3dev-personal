@@ -4,7 +4,7 @@ import requests
 import re
 import logging
 import sys
-import socket
+#import socket
 import time
 import json
 import jinja2

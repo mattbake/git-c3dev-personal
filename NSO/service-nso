@@ -46,12 +46,12 @@ ASA_HOST=$AsaHost
 ASA_PORT=$AsaPort
 
 
-createServiceInstance() {
-		print_log "Creating Service Instance"
-		curl -X POST -u admin:admin --header "Content-Type:application/vnd.yang.data+json" \ http://$NSO_ENDPOINT:8080/api/running/services \ -d '{"stackedIfMgr:stackedIfMgr": [{"name": "$SERVICE_INSTANCE", "cat-device": "c0", "asa-device": "asa0",
-"cat-wan-ip": "10.1.1.1/30", "cat-lan-ip": "172.16.16.1/24", "asa-port": "80", "asa-host": "172.16.16.16"}]}'
+#createServiceInstance() {
+#		print_log "Creating Service Instance"
+#		curl -X POST -u admin:admin --header "Content-Type:application/vnd.yang.data+json" \ http://$NSO_ENDPOINT:8080/api/running/services \ -d '{"stackedIfMgr:stackedIfMgr": [{"name": "$SERVICE_INSTANCE", "cat-device": "c0", "asa-device": "asa0",
+#"cat-wan-ip": "10.1.1.1/30", "cat-lan-ip": "172.16.16.1/24", "asa-port": "80", "asa-host": "172.16.16.16"}]}'
 
-}
+#}
 
 
 # RUN EVERYTHING AS ROOT
