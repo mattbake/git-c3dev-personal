@@ -1,0 +1,9 @@
+{
+        "name": "%SERVICE_INSTANCE%",
+        "cat-device": "%CAT_DEVICE%",
+        "asa-device": "%ASA_DEVICE%",
+        "cat-wan-ip": "%CAT_WAN_IP%",
+        "cat-lan-ip": "%CAT_LAN_IP%",
+        "asa-port": "%ASA_PORT%",
+        "asa-host": "%ASA_HOST%"
+}

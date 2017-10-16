@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# RDS MySql service script
-
-# exec > >(tee -a /usr/local/osmosix/logs/service.log) 2>&1
-
 . /utils.sh
 
 cmd=$1
@@ -80,7 +76,6 @@ function getMembers() {
 
 function createNSOParams() {
 
- sed -i "$NSO_ENDPOINT" params.json
  sed -i "$SERVICE_INSTANCE" params.json
  sed -i "$CAT_DEVICE" params.json
  sed -i "$CAT_WAN_IP" params.json
@@ -116,16 +111,16 @@ createNSOParams
 case $cmd in
 	start)
 		print_log "Executing Service.."
-		python nso_rest.py -u $NSOUser -p $NSOPassword -c post -t $NSOAddress -var params.json
+		python nso_rest.py -u $NSOUser -p $NSOPassword -c post -t $NSOAddress -var params.json >/tmp/mydebugfile
 		executionStatus
 		;;
 	stop)
 		print_log "Deleting Service.."
-		python nso_rest.py -u $NSOUser -p $NSOPassword -c delete -t $NSOAddress -var params.json
+		python nso_rest.py -u $NSOUser -p $NSOPassword -c delete -t $NSOAddress -var params.json >/tmp/mydebugfile
 		;;
 	update)
 		print_log "Updating Service.."
-		python nso_rest.py -u $NSOUser -p $NSOPassword -c put -t $NSOAddress -var params.json
+		python nso_rest.py -u $NSOUser -p $NSOPassword -c put -t $NSOAddress -var params.json >/tmp/mydebugfile
 		;;
 	*)
 		serviceStatus="No Valid Script Argument"

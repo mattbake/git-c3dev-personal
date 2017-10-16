@@ -1,4 +1,3 @@
-
 import argparse
 import requests
 import re
@@ -16,7 +15,7 @@ requests.packages.urllib3.disable_warnings()
 protocol_dict = {'https':'''https://''',
                 }
 
-url_dict = {'deploy':'''/mgmt/tm/cloud/services/iapp/''',
+url_dict = {'deploy':'''/api/running/services/''',
            }
 
 session = requests.Session()
@@ -29,7 +28,7 @@ def argparser():
     parse.add_argument('-s', '--https', action='store_true', default=True, help='enable https or http, default is https')
     parse.add_argument('-t', type=str, required=True, metavar='ip', help='multiple target IPs')
     parse.add_argument('-c', type=str, required=True, metavar='rest', help='type of the REST call: post, put, delete')
-    parse.add_argument('-template', type=str, metavar='template', help='JSON template file')
+#    parse.add_argument('-template', type=str, metavar='template', help='JSON template file')
     parse.add_argument('-var', type=str, metavar='var', help='Variable in JSON format')
 
     return parse.parse_args()
@@ -37,10 +36,6 @@ def argparser():
 def build_url(protocol, host, url):
     full_url = str(protocol) + str(host) + str(url)
     return full_url
-
-def build_iapp_url(protocol, host, url, iapp):
-	full_iapp_url = str(protocol) + str(host) + str(url) + str(iapp)
-	return full_iapp_url
 
 def postJSON(session, username, password, url, content_type, json_string):
     return session.post(url, auth=HTTPBasicAuth(username, password), headers=content_type, verify=False, data=json_string)
@@ -62,8 +57,8 @@ def main(args):
     ip = str(args.t)
     rest_call = str(args.c)
     protocol = protocol_dict['https']
-    content_type = {'''accept''':'application/json','''content-type''':'application/json'}
-    template_file = str(args.template)
+    content_type = {'''accept''':'application/vnd.yang.data+json','''content-type''':'application/vnd.yang.data+json'}
+#    template_file = str(args.template)
     variable_file = str(args.var)
     json_string = ''
 
@@ -71,8 +66,8 @@ def main(args):
     # use level=logging.INFO to set logging level to info
     # use logging=logging.DEBUG to set logging level to debug
     logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
-    template_env = jinja2.Environment(loader=jinja2.FileSystemLoader(searchpath="./"))
-    template = template_env.get_template(template_file)
+#    template_env = jinja2.Environment(loader=jinja2.FileSystemLoader(searchpath="./"))
+#    template = template_env.get_template(template_file)
 
     json_var = read_json_file(variable_file)
     json_string = template.render(json_var)
@@ -85,9 +80,9 @@ def main(args):
     if rest_call in ['post']:
     	req = postJSON(session, username, password, url, content_type, json_string)
     elif rest_call in ['put']:
-    	req = putJSON(session, username, password, iapp_url, content_type, json_string)
+    	req = putJSON(session, username, password, url, content_type, json_string)
     elif rest_call in ['delete']:
-    	req = deleteJSON(session, username, password, iapp_url, content_type, json_string)
+    	req = deleteJSON(session, username, password, url, content_type, json_string)
     else:
     	logging.debug('+++++ Invalid REST input +++++\n' + rest_call + '\n+++++\n')
 
