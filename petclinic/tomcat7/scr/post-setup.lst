@@ -1,0 +1,8 @@
+# Following scripts will be executed in the order they appear
+# Y - run
+# N - skip
+# E - execute - executed as ./<SCRIPT-PATH> - 
+# S - source - executed as source <SCRIPT_PATH> - use when setting env variables
+#
+# Usage:
+# Y|E|$OSSVC_NAME/path/script.sh

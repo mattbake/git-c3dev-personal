@@ -70,7 +70,7 @@ def main(args):
 #    template = template_env.get_template(template_file)
 
     json_var = read_json_file(variable_file)
-    json_string = template.render(json_var)
+#    json_string = template.render(json_var)
     logging.debug('+++++ POST this JSON +++++\n' + json_string + '+++++ END of JSON string +++++')
 
     logging.info('+++++ Logging in... +++++')

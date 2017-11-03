@@ -1,0 +1,548 @@
+#!/bin/bash
+
+# Hadoop node configurator
+
+exec > >(tee -a /usr/local/osmosix/logs/service.log) 2>&1
+echo "Executing service script.."
+OSSVC_HOME=/usr/local/osmosix/service
+
+. /usr/local/osmosix/etc/.osmosix.sh
+. /usr/local/osmosix/etc/userenv
+. $OSSVC_HOME/utils/cfgutil.sh
+. $OSSVC_HOME/utils/nosqlutil.sh
+. $OSSVC_HOME/utils/install_util.sh
+. $OSSVC_HOME/utils/os_info_util.sh
+. ./docker.sh
+
+#May not be required but just in case
+#Kill apache2 if already running
+APACHE2_PID=`ps -ef|grep -i apache2|grep -v grep|awk '{print $2}'`
+if [ -n "$APACHE2_PID" ]; then
+    kill -p $APACHE2_PID
+    log "[CLEANING] - Killed existing apache2 process."
+fi
+
+
+cmd=$1
+SVCNAME=tomcat7
+VERSION=7.0.59
+OSMOSIX_INSTALL_DIR=/usr/local
+USER_ENV=/usr/local/osmosix/etc/userenv
+StartingPort=12000
+#USE_SERVICE_LOG=true
+username=`getUserName`
+groupname=$username
+
+echo "User Name is - $username"
+
+if [[ -n "$USER_PORT_RANGE_START" ]]; then
+    StartingPort=${USER_PORT_RANGE_START}
+fi
+
+# Tomcat URL and Package Info
+TOMCAT_DIR="apache-tomcat-$VERSION"
+TOMCAT_TGZ="apache-tomcat-$VERSION.tar.gz"
+TOMCAT_URL="http://archive.apache.org/dist/tomcat/tomcat-7/v$VERSION/bin/$TOMCAT_TGZ"
+
+# APR URL and Package info
+APR_URL='http://repo.cliqrtech.com/bin/apr-1.5.1.tar.gz'
+APR_TGZ='apr-1.5.1.tar.gz'
+APR_DIR='apr-1.5.1'
+
+# Tomcat Native URL and Package Info
+NATIVE_URL='http://archive.apache.org/dist/tomcat/tomcat-connectors/native/1.1.32/source/tomcat-native-1.1.32-src.tar.gz'
+NATIVE_TGZ='tomcat-native-1.1.32-src.tar.gz'
+NATIVE_DIR='tomcat-native-1.1.32-src'
+
+# Putty URL and Package Info
+PUTTY_URL='http://apt.sw.be/redhat/el6/en/x86_64/rpmforge/RPMS/putty-0.63-1.el6.rf.x86_64.rpm'
+PUTTY_RPM='putty-0.63-1.el6.rf.x86_64.rpm'
+
+if [ ! -z $CUSTOM_REPO_URL ]; then
+    TOMCAT_URL=$CUSTOM_REPO_URL/bin/$TOMCAT_TGZ
+    APR_URL=$CUSTOM_REPO_URL/bin/$APR_TGZ
+    NATIVE_URL=$CUSTOM_REPO_URL/bin/$NATIVE_TGZ
+    PUTTY_URL=$CUSTOM_REPO_URL/bin/$PUTTY_RPM
+fi
+
+export TOMCAT_DIR=$TOMCAT_DIR
+export TOMCAT_TGZ=$TOMCAT_TGZ
+export TOMCAT_URL=$TOMCAT_URL
+
+export APR_URL=$APR_URL
+export APR_TGZ=$APR_TGZ
+export APR_DIR=$APR_DIR
+
+export NATIVE_URL=$NATIVE_URL
+export NATIVE_TGZ=$NATIVE_TGZ
+export NATIVE_DIR=$NATIVE_DIR
+
+export PUTTY_URL=$PUTTY_URL
+export PUTTY_RPM=$PUTTY_RPM
+
+root_dir="$( cd "$( dirname $0 )" && pwd )"
+echo Root dir $root_dir
+
+installTomcat() {
+    preInstall "package-update"
+    installUnzip
+    if [ $? -ne 0 ]
+    then
+        log "[INSTALL] Failed to install unzip"
+        exit 1
+    fi
+
+    if [ $os == "Ubuntu" ]
+    then
+        log "[INSTALL] OS: $os and version: $ver. Installing libtcnative-1"
+        #apt-get install -y libtcnative-1
+	apt-get install -y putty-tools build-essential autoconf libtool openssl libssl-dev curl
+	installTomcatNative
+    elif ([ $os == "CentOS" ] || [ $os == "RHEL" ])
+    then
+        log "[INSTALL] OS: $os and version: $ver. Installing tomcat-native"
+        #yum install -y tomcat-native
+	wget $PUTTY_URL
+        rpm -ivh $PUTTY_RPM
+        rm -f $PUTTY_RPM
+        yum install -y autoconf libtool openssl openssl-devel
+	installTomcatNative
+    fi
+
+    log "[INSTALL] Starting $SVCNAME installation"
+    cd $OSMOSIX_INSTALL_DIR
+    wget $TOMCAT_URL
+    if [ $? -ne 0 ]
+    then
+        log "[INSTALL] Failed downloading $SVCNAME"
+        exit 1
+    fi
+
+    tar xzvf $TOMCAT_TGZ
+    if [ -d $SVCNAME -o -f $SVCNAME ]; then
+        rm $SVCNAME || rm -r $SVCNAME
+    fi
+    ln -s $TOMCAT_DIR  $SVCNAME
+    rm -f $TOMCAT_TGZ
+
+    cp ${root_dir}'/mysql-connector-java-5.1.24-bin.jar' ${TOMCAT_DIR}'/lib/'
+    exit 0
+}
+
+installTomcatNative() {
+    # Building and Installing APR
+    cd $OSMOSIX_INSTALL_DIR
+    wget $APR_URL
+    if [ $? -ne 0 ]
+    then
+            log "[INSTALL] Failed downloading $APR_URL for $SVCNAME"
+            exit 1
+    fi
+
+    tar xzvf $APR_TGZ
+    cd $APR_DIR
+    ./buildconf
+    ./configure
+    make
+    if [ $? -ne 0 ]
+    then
+            log "[INSTALL] Failed installing APR for $SVCNAME"
+            exit 1
+    fi
+    make install
+    rm -f $APR_TGZ
+
+    # Building and Installing Tomcat Native
+    cd $OSMOSIX_INSTALL_DIR
+    wget $NATIVE_URL
+    if [ $? -ne 0 ]
+    then
+            log "[INSTALL] Failed downloading $NATIVE_URL for $SVCNAME"
+            exit 1
+    fi
+
+    tar zxvf $NATIVE_TGZ
+    export JAVA_HOME='/usr/lib/jvm/java-7-sun'
+    cd $NATIVE_DIR/jni/native
+    ./configure --with-apr=/usr/local/apr
+    make
+    if [ $? -ne 0 ]
+    then
+            log "[INSTALL] Failed installing tomcat-native for $SVCNAME"
+            exit 1
+    fi
+    make install
+
+    # Remove tgz files of apr and tomcat native
+    cd $OSMOSIX_INSTALL_DIR
+    rm -f $APR_TGZ
+    rm -f $NATIVE_TGZ
+}
+
+generateTomcatConfig() {
+	log "[CONFIGURATION] - Generating $SVCNAME config file"
+
+	# Note
+	# Only if the app server is top tier, we would enable https and https rederct, otherwise certificates in
+
+	SERVER_XML="/usr/local/$SVCNAME/conf/server.xml"
+	WEB_XML="/usr/local/$SVCNAME/conf/web.xml"
+	FIREWALL_RULES="/usr/local/$SVCNAME/conf/firewall.rule"
+
+	#docker host doesn't have tomcat installed, so create conf directory for mounting
+	if [ ! -d "/usr/local/$SVCNAME/conf" ]; then
+		mkdir -p "/usr/local/$SVCNAME/conf"
+	fi
+
+	cp $SVCHOME/conf/* /usr/local/$SVCNAME/conf
+
+	#Replace the USERNAME with username value in init.d/tomcat7
+	replaceToken $SVCHOME/init.d/tomcat7 "%USERNAME%" $username
+
+	cp $SVCHOME/init.d/tomcat7 /etc/init.d
+	cp $SVCHOME/conf/firewall.rule /usr/local/$SVCNAME/conf
+	chmod 0755 /etc/init.d/tomcat7
+	#TODO move the firewall settings to standard locations based on the linux variant
+
+
+	if [ "$topTier" != "true" ]; then
+	    portToListen=$(getNextAvailablePort "$StartingPort")
+	    log "[DEBUG] - Next available port $portToListen"
+		log "[LISTENING PORT] - Listening on $portToListen as this is not top tier."
+		replaceToken $SERVER_XML "%UN_PRIV_HTTP_PORT%" $portToListen
+		uncommentXml $SERVER_XML "CUSTOM_HTTP_PORT_ENABLED"
+		httpRedirectRule=`generateIptableRuleForAllEth 80 $portToListen`
+		replaceToken $FIREWALL_RULES "#%HTTP_REDIRECT%" "$httpRedirectRule"
+	else
+		if [ "$cliqrInternalHttpEnabled" == 1 ]; then
+			uncommentXml $SERVER_XML "INTERNAL_HTTP_ENABLED"
+		    log "[LISTENING PORT] - Listening on internal HTTP port 8080"
+		fi
+
+		if [ "$cliqrExternalHttpEnabled" == 1 ]; then
+		    httpPortToListen=$(getNextAvailablePort "$(($StartingPort + 1000))" )
+		    log "[DEBUG] - Next available port $httpPortToListen"
+		    replaceToken $SERVER_XML "%UN_PRIV_HTTP_PORT%" $httpPortToListen
+			uncommentXml $SERVER_XML "CUSTOM_HTTP_PORT_ENABLED"
+			httpRedirectRule=`generateIptableRuleForAllEth 80 $httpPortToListen`
+		    replaceToken $FIREWALL_RULES "#%HTTP_REDIRECT%" "$httpRedirectRule"
+		    log "[LISTENING PORT] - Listening on external HTTP port 80"
+		fi
+
+        if [ "$cliqrExternalHttpsEnabled" == 1 ]; then
+			if [ -r "$cliqrSSLCert" -a -f "$cliqrSSLCert" -a -r "$cliqrSSLKey"  -a -f "$cliqrSSLKey" ];
+			then
+			    SSL_DIR=$OSMOSIX_INSTALL_DIR/$SVCNAME/conf/ssl
+                            mkdir -p $SSL_DIR
+                            cp $cliqrSSLCert $SSL_DIR/cliqrSSLCert
+                            cp $cliqrSSLKey $SSL_DIR/cliqrSSLKey
+			    httpsPortToListen=$(getNextAvailablePort "$(($StartingPort + 2000 ))")
+			    log "[DEBUG] - Next available port $httpsPortToListen"
+			    replaceToken $SERVER_XML "%UN_PRIV_HTTPS_PORT%" $httpsPortToListen
+				uncommentXml $SERVER_XML "CUSTOM_HTTPS_PORT_ENABLED"
+				replaceToken $SERVER_XML "%SSL_CERT%" $SSL_DIR/cliqrSSLCert
+				replaceToken $SERVER_XML "%SSL_KEY%" $SSL_DIR/cliqrSSLKey
+				httpsRedirectRule=`generateIptableRuleForAllEth 443 $httpsPortToListen`
+		        replaceToken $FIREWALL_RULES "#%HTTPS_REDIRECT%" "$httpsRedirectRule"
+		        log "[LISTENING PORT] - Listening on external HTTPS port 443"
+			else
+				log "[LISTERNING PORT] - Listening on HTTPS port but certificates are missing"
+	   			log "HTTPS is enabled but certificates are missing or unreadable"
+			fi
+		fi
+
+        if [ "$cliqrForceHttpRedirect" == 1 ]; then
+                uncommentXml $WEB_XML "FORCE_HTTP_REDIRECT"
+                log "[REDIRECTION] - Forcing HTTPS redirect"
+        fi
+	fi
+
+	log "[CONFIGURATION] Configuring DB settings"
+	cd /usr/local/$SVCNAME/webapps/$cliqrWebappContext
+	overrideNosqlIp
+	BACKUP_DIR=$SVCHOME/bkp/
+	CFG_LIST=(`echo $cliqrWebappConfigFiles | tr ";" "\n"`)
+	for cfgFile in "${CFG_LIST[@]}"
+	do
+		echo "[RESTORE CONFIG FILE] $cfgFile"
+		cp "$BACKUP_DIR/$cfgFile" $cfgFile
+		replaceToken $cfgFile "%NOSQLDB_TIER_IP%" $CliqrTier_NoSQLDatabase_IP
+		replaceToken $cfgFile "%DB_TIER_IP%" $CliqrTier_Database_IP
+		replaceToken $cfgFile "%MB_TIER_IP%" $CliqrTier_MsgBus_IP
+		replaceToken $cfgFile "%BC_TIER_IP%" $CliqrTier_BackendCache_IP
+		replaceTierIpToken $cfgFile
+	done
+	log "[CONFIGURATION] Configured DB settings"
+
+	log "[TOMCAT CONFIGURATION] - Successfully generated tomcat config file!"
+}
+
+deployWebapp() {
+	log "[DEPLOYMENT] - Deploying webapp $cliqrWARFile..."
+
+	if [ ! -f $cliqrWARFile ]; then
+		log "[DEPLOYMENT] - $cliqrWARFile does not exist!"
+		exit 127
+	fi
+
+	#create webapps folder on docker host
+	if [ ! -d "/usr/local/$SVCNAME/webapps" ]; then
+	    mkdir -p "/usr/local/$SVCNAME/webapps"
+	fi
+
+	rm -rf /usr/local/$SVCNAME/webapps/*
+	cp $cliqrWARFile /usr/local/$SVCNAME/webapps/$cliqrWebappContext.war
+	cd /usr/local/$SVCNAME/webapps
+	unzip -o -q $cliqrWebappContext.war -d $cliqrWebappContext || exit 127
+	rm -rf /usr/local/$SVCNAME/webapps/*.war
+
+	log "[DEPLOYMENT] - Giving ownership of /usr/local/$SVCNAME/ to $username "
+    chown -R $username:$groupname /usr/local/$SVCNAME/
+
+    log "[DEPLOYMENT] Backing up webapp config files"
+    BACKUP_DIR=$SVCHOME/bkp/
+    mkdir -p $BACKUP_DIR
+
+    CFG_LIST=(`echo $cliqrWebappConfigFiles | tr ";" "\n"`)
+	for cfgFile in "${CFG_LIST[@]}"
+	do
+		echo "[BACKUP] backing up $cliqrWebappContext/$cfgFile to $BACKUP_DIR"
+		dirName=`dirname $cfgFile`
+		mkdir -p $BACKUP_DIR/$dirName
+		cp $cliqrWebappContext/$cfgFile $BACKUP_DIR/$dirName
+	done
+
+    log "[DEPLOYMENT] - Succesfully deployed $cliqrWARFile"
+}
+
+
+cleanUp() {
+    rm -rf /usr/local/$SVCNAME/webapps/$cliqrWebappContext
+}
+
+startTomcatService() {
+	/etc/init.d/tomcat7 start
+}
+
+stopTomcatService() {
+	/etc/init.d/tomcat7 stop
+}
+
+restartTomcatService() {
+	/etc/init.d/tomcat7 restart
+}
+
+log() {
+	if [ -n "$USE_SERVICE_LOG"  -a "$USE_SERVICE_LOG" == "true" ];then
+	    echo "$*"
+	else
+		logger -t "OSMOSIX" "[$SVCNAME] $*"
+	fi
+}
+
+# main entry
+if [ -z "$OSSVC_HOME" ]; then
+	log "missing parameter, exit now"
+	exit 127
+fi
+SVCHOME="$OSSVC_HOME/$SVCNAME"
+
+if [ "$cliqrJDKVersion" == "JDK6" ]; then
+	export JAVA_HOME="/usr/lib/jvm/java-6-sun"
+	installJava6	
+elif [ "$cliqrJDKVersion" == "JDK7" ]; then
+	export JAVA_HOME="/usr/lib/jvm/java-7-sun"
+	installJava7	
+elif [ "$cliqrJDKVersion" == "JDK8" ]; then
+    	export JAVA_HOME="/usr/lib/jvm/java-8-sun"
+    	installJava8	
+else
+    	export JAVA_HOME="/usr/lib/jvm/java-7-sun"
+    	installJava7	
+fi
+
+runDocker(){
+    case $cmd in
+        install)
+            log "[INSTALL] Downloading and extract $SVCNAME package"
+            installTomcatDocker
+            ;;
+        deploy)
+            log "[DEPLOY] Deploying webapp"
+            deployWebapp
+            ;;
+        configure)
+            log "[CONFIGURE] Generting tomcat configuration"
+            generateTomcatDockerConfig
+            ;;
+        start)
+
+            #log "[START] Mounting storage volumes"
+            #mountSharedStorages
+            log "[START] Invoking pre-start user script"
+            if [ ! -z "$cliqrUserScript" -a -f "$cliqrUserScript" ]; then
+                $cliqrUserScript 1 $cliqrUserScriptParams
+            fi
+            preSetup
+            log "[START] Starting $SVCNAME "
+            startTomcatDockerService
+            postSetup
+
+            log "[START] Invoking post-start user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 2 $cliqrUserScriptParams
+            fi
+
+            # Run restore script in case of migration
+            if [ "$appMigrating" = "true" ]; then
+                runMigrationRestoreScript
+            fi
+            log "[START] $SVCNAME successfully started"
+            ;;
+        stop)
+            log "[STOP] Invoking pre-stop user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 3 $cliqrUserScriptParams
+            fi
+
+            log "[STOP] Stopping $SVCNAME "
+            stopTomcatDockerService
+
+            log "[STOP] Invoking post-stop user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 4 $cliqrUserScriptParams
+            fi
+            log "[STOP] $SVCNAME successfully stopped"
+            ;;
+        restart)
+            log "[RESTART] Restarting $SVCNAME ..."
+            restartTomcatDockerService
+            log "[RESTART] $SVCNAME restarted."
+            ;;
+        cleanup)
+            log "[CLEANUP] Cleaning up $SVCNAME "
+            stopTomcatDockerService
+            cleanUp
+            log "[CLEANUP] $SVCNAME successfully cleaned up "
+            ;;
+        reload)
+            log "[RELOAD] Reloading $SVCNAME"
+            restartTomcatDockerService
+            log "[RELOAD] $SVCNAME successfully reloaded."
+            ;;
+        upgrade)
+            log "[UPGRADE] Upgrading $SVCNAME"
+            deployWebapp
+
+            log "[UPGRADE] Configuring $SVCNAME"
+            generateTomcatDockerConfig
+
+            restartTomcatDockerService
+            log "[UPGRADE] $SVCNAME upgraded"
+            ;;
+        *)
+            log "[ERROR] unknown command"
+            exit 127
+            ;;
+    esac
+}
+
+
+
+runScripts(){
+    case $cmd in
+        install)
+            log "[INSTALL] Downloading and extract $SVCNAME package"
+            installTomcat
+            ;;
+        deploy)
+            log "[DEPLOY] Deploying webapp"
+            deployWebapp
+            ;;
+        configure)
+            log "[CONFIGURE] Generting tomcat configuration"
+            generateTomcatConfig
+            ;;
+        start)
+
+            log "[START] Mounting storage volumes"
+            mountSharedStorages
+            log "[START] Invoking pre-start user script"
+            if [ ! -z "$cliqrUserScript" -a -f "$cliqrUserScript" ]; then
+                $cliqrUserScript 1 $cliqrUserScriptParams
+            fi
+            preSetup
+            log "[START] Starting $SVCNAME "
+            startTomcatService
+            postSetup
+
+            log "[START] Invoking post-start user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 2 $cliqrUserScriptParams
+            fi
+
+            # Run restore script in case of migration
+            if [ "$appMigrating" = "true" ]; then
+                runMigrationRestoreScript
+            fi
+            log "[START] $SVCNAME successfully started"
+            ;;
+        stop)
+            log "[STOP] Invoking pre-stop user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 3 $cliqrUserScriptParams
+            fi
+
+            log "[STOP] Stopping $SVCNAME "
+            stopTomcatService
+
+            log "[STOP] Invoking post-stop user script"
+            if [ ! -z $cliqrUserScript -a -f $cliqrUserScript ]; then
+                $cliqrUserScript 4 $cliqrUserScriptParams
+            fi
+            log "[STOP] $SVCNAME successfully stopped"
+            ;;
+        restart)
+            log "[RESTART] Restarting $SVCNAME "
+            restartTomcatService
+            log "[RESTART] $SVCNAME successfully restarted."
+            ;;
+        cleanup)
+            log "[CLEANUP] Cleaning up $SVCNAME "
+            stopTomcatService
+            cleanUp
+            log "[CLEANUP] $SVCNAME successfully cleaned up "
+            ;;
+        reload)
+            log "[RELOAD] Reloading $SVCNAME"
+            #TOMCAT needs to restarted for config settings to take effect
+            log "[RELOAD] Restarting tomcat with new config settings"
+            restartTomcatService
+            log "[RELOAD] $SVCNAME successfully reloaded."
+            ;;
+        upgrade)
+            log "[UPGRADE] Upgrading $SVCNAME "
+            deployWebapp
+
+            log "[UPGRADE] Generating tomcat configuration"
+            generateTomcatConfig
+
+            restartTomcatService
+            log "[UPGRADE] $SVCNAME upgraded. "
+            ;;
+        *)
+            log "[ERROR] unknown command"
+            exit 127
+            ;;
+    esac
+}
+
+
+
+
+# main entry
+if  useDocker ; then
+    runDocker
+else
+    runScripts
+fi
