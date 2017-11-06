@@ -1,0 +1,86 @@
+#! /bin/bash
+#
+# description: Auto-starts tomcat
+# processname: tomcat
+# pidfile: /var/run/tomcat.pid
+
+SHUTDOWN_WAIT=20
+export LD_LIBRARY_PATH=/usr/local/apr/lib:$LD_LIBRARY_PATH
+
+tomcat_pid() {
+  echo `ps aux | grep catalina | grep -v grep | awk '{ print $2 }'`
+}
+
+tomcat_user(){
+    echo %USERNAME%
+}
+
+start() {
+  pid=$(tomcat_pid)
+  if [ -n "$pid" ]
+     then
+        echo "Tomcat is already running (pid: $pid)"
+     else
+        echo "Starting Tomcat"
+        su -c /usr/local/tomcat7/bin/startup.sh $(tomcat_user)
+
+        if [ $? -eq 0 ]
+        then
+			echo "Succesfully started Tomcat 7"
+			echo "Adding iptable nat rules to redirect to non standard ports."
+			iptables-restore < /usr/local/tomcat7/conf/firewall.rule
+			echo "Successfully restored iptable nat chain rules."
+        else
+          echo "Failed to start Tomcat 7"
+          return 1
+        fi
+   fi
+   return 0
+} 
+ 
+stop() {
+ pid=$(tomcat_pid)
+  if [ -n "$pid" ]
+  then
+ 
+    echo "Stopping Tomcat 7"
+    su -c /usr/local/tomcat7/bin/shutdown.sh $(tomcat_user)
+ 
+    echo -n "Waiting for processes to exit ["
+    let kwait=$SHUTDOWN_WAIT
+    count=0;
+    until [ `ps -p $pid | grep -c $pid` = '0' ] || [ $count -gt $kwait ]
+    do
+      echo -n ".";
+      sleep 1
+      let count=$count+1;
+    done
+    echo "Done]"
+ 
+    if [ $count -gt $kwait ]
+    then
+      echo "Killing processes ($pid) which didn't stop after $SHUTDOWN_WAIT seconds"
+      kill -9 $pid
+    fi
+  else
+    echo "Tomcat 7 is not running"
+  fi
+ 
+  return 0
+} 
+
+case $1 in
+start)
+    start
+        ;;
+stop)
+    stop
+        ;;
+restart)
+    stop
+    start
+        ;;
+esac
+exit 0
+
+
